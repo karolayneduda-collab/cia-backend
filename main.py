@@ -564,3 +564,33 @@ def buscar_progresso(codigo_acesso: str, caso_id: str):
         "semana_atual": semana_atual,
         "revelacao_disponivel": revelacao_disponivel
     }
+    @app.get("/popular-acessos")
+def popular_acessos():
+    conn = conectar()
+    cursor = conn.cursor()
+
+    criar_acessos_iniciais(cursor, conn)
+
+    cursor.execute("""
+        SELECT
+            codigo_acesso,
+            nome_cliente,
+            caso_id,
+            ativo,
+            data_criacao,
+            data_inicio,
+            data_final
+        FROM acessos
+        ORDER BY codigo_acesso ASC
+    """)
+
+    acessos = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    return {
+        "mensagem": "Acessos iniciais criados/verificados com sucesso.",
+        "total": len(acessos),
+        "acessos": acessos
+    }
