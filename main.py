@@ -1,10 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
+from typing import List, Optional
 
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -29,8 +30,8 @@ class Progresso(BaseModel):
     codigo_acesso: str
     nome: str
     caso_id: str
-    voto: str | None = None
-    teorias: list[str] = []
+    voto: Optional[str] = None
+    teorias: List[str] = Field(default_factory=list)
     pistas_liberadas: int = 0
     revelacao_liberada: bool = False
 
@@ -49,14 +50,22 @@ class NovoAcesso(BaseModel):
 
 
 # =========================
-# BANCO DE DADOS
+# CONEXÃO
 # =========================
 
 def conectar():
     if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL não foi configurada.")
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        raise RuntimeError("DATABASE_URL não foi configurada no Render.")
 
+    return psycopg2.connect(
+        DATABASE_URL,
+        cursor_factory=RealDictCursor
+    )
+
+
+# =========================
+# ACESSOS INICIAIS
+# =========================
 
 def criar_acessos_iniciais(cursor, conn):
     acessos_iniciais = [
@@ -73,7 +82,8 @@ def criar_acessos_iniciais(cursor, conn):
     ]
 
     for codigo, nome, caso_id in acessos_iniciais:
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO acessos (
                 codigo_acesso,
                 nome_cliente,
@@ -83,16 +93,23 @@ def criar_acessos_iniciais(cursor, conn):
             VALUES (%s, %s, %s, TRUE)
             ON CONFLICT (codigo_acesso)
             DO NOTHING
-        """, (codigo, nome, caso_id))
+            """,
+            (codigo, nome, caso_id)
+        )
 
     conn.commit()
 
+
+# =========================
+# CRIAR TABELAS
+# =========================
 
 def criar_tabelas():
     conn = conectar()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS acessos (
             codigo_acesso TEXT PRIMARY KEY,
             nome_cliente TEXT NOT NULL,
@@ -102,9 +119,11 @@ def criar_tabelas():
             data_inicio TIMESTAMP,
             data_final TIMESTAMP
         )
-    """)
+        """
+    )
 
-    cursor.execute("""
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS progresso (
             codigo_acesso TEXT NOT NULL,
             nome TEXT NOT NULL,
@@ -119,7 +138,8 @@ def criar_tabelas():
             atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (codigo_acesso, caso_id)
         )
-    """)
+        """
+    )
 
     conn.commit()
 
@@ -145,8 +165,53 @@ def home():
     }
 
 
+@app.get("/teste")
+def teste():
+    return {
+        "mensagem": "API online"
+    }
+
+
 # =========================
-# ACESSOS
+# POPULAR ACESSOS MANUALMENTE
+# =========================
+
+@app.get("/popular-acessos")
+def popular_acessos():
+    conn = conectar()
+    cursor = conn.cursor()
+
+    criar_acessos_iniciais(cursor, conn)
+
+    cursor.execute(
+        """
+        SELECT
+            codigo_acesso,
+            nome_cliente,
+            caso_id,
+            ativo,
+            data_criacao,
+            data_inicio,
+            data_final
+        FROM acessos
+        ORDER BY codigo_acesso ASC
+        """
+    )
+
+    acessos = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    return {
+        "mensagem": "Acessos iniciais criados/verificados com sucesso.",
+        "total": len(acessos),
+        "acessos": acessos
+    }
+
+
+# =========================
+# VALIDAR ACESSO
 # =========================
 
 @app.get("/validar-acesso/{codigo_acesso}/{caso_id}")
@@ -154,13 +219,16 @@ def validar_acesso(codigo_acesso: str, caso_id: str):
     conn = conectar()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT *
         FROM acessos
         WHERE codigo_acesso = %s
         AND caso_id = %s
         AND ativo = TRUE
-    """, (codigo_acesso, caso_id))
+        """,
+        (codigo_acesso, caso_id)
+    )
 
     acesso = cursor.fetchone()
 
@@ -185,12 +253,17 @@ def validar_acesso(codigo_acesso: str, caso_id: str):
     }
 
 
+# =========================
+# LISTAR ACESSOS
+# =========================
+
 @app.get("/acessos")
 def listar_acessos():
     conn = conectar()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT
             codigo_acesso,
             nome_cliente,
@@ -201,7 +274,8 @@ def listar_acessos():
             data_final
         FROM acessos
         ORDER BY codigo_acesso ASC
-    """)
+        """
+    )
 
     acessos = cursor.fetchall()
 
@@ -214,12 +288,17 @@ def listar_acessos():
     }
 
 
+# =========================
+# CRIAR OU ATUALIZAR ACESSO
+# =========================
+
 @app.post("/criar-acesso")
 def criar_acesso(dados: NovoAcesso):
     conn = conectar()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    cursor.execute(
+        """
         INSERT INTO acessos (
             codigo_acesso,
             nome_cliente,
@@ -232,12 +311,14 @@ def criar_acesso(dados: NovoAcesso):
             nome_cliente = EXCLUDED.nome_cliente,
             caso_id = EXCLUDED.caso_id,
             ativo = EXCLUDED.ativo
-    """, (
-        dados.codigo_acesso,
-        dados.nome_cliente,
-        dados.caso_id,
-        dados.ativo
-    ))
+        """,
+        (
+            dados.codigo_acesso,
+            dados.nome_cliente,
+            dados.caso_id,
+            dados.ativo
+        )
+    )
 
     conn.commit()
     cursor.close()
@@ -261,36 +342,44 @@ def aceitar_caso(dados: AceiteCaso):
     conn = conectar()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT *
         FROM acessos
         WHERE codigo_acesso = %s
         AND caso_id = %s
         AND ativo = TRUE
-    """, (dados.codigo_acesso, dados.caso_id))
+        """,
+        (dados.codigo_acesso, dados.caso_id)
+    )
 
     acesso = cursor.fetchone()
 
     if not acesso:
         cursor.close()
         conn.close()
+
         return {
             "autorizado": False,
             "mensagem": "Código inválido, inativo ou sem acesso a este caso."
         }
 
     if acesso["data_inicio"]:
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT *
             FROM progresso
             WHERE codigo_acesso = %s
             AND caso_id = %s
-        """, (dados.codigo_acesso, dados.caso_id))
+            """,
+            (dados.codigo_acesso, dados.caso_id)
+        )
 
         progresso_existente = cursor.fetchone()
 
         if not progresso_existente:
-            cursor.execute("""
+            cursor.execute(
+                """
                 INSERT INTO progresso (
                     codigo_acesso,
                     nome,
@@ -304,16 +393,18 @@ def aceitar_caso(dados: AceiteCaso):
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (codigo_acesso, caso_id)
                 DO NOTHING
-            """, (
-                dados.codigo_acesso,
-                dados.nome,
-                dados.caso_id,
-                "",
-                0,
-                False,
-                acesso["data_inicio"],
-                acesso["data_final"]
-            ))
+                """,
+                (
+                    dados.codigo_acesso,
+                    dados.nome,
+                    dados.caso_id,
+                    "",
+                    0,
+                    False,
+                    acesso["data_inicio"],
+                    acesso["data_final"]
+                )
+            )
 
             conn.commit()
 
@@ -322,7 +413,7 @@ def aceitar_caso(dados: AceiteCaso):
 
         return {
             "autorizado": True,
-            "mensagem": "Caso já havia sido aceito",
+            "mensagem": "Caso já havia sido aceito.",
             "data_inicio": acesso["data_inicio"],
             "data_final": acesso["data_final"]
         }
@@ -330,20 +421,24 @@ def aceitar_caso(dados: AceiteCaso):
     data_inicio = datetime.utcnow()
     data_final = data_inicio + timedelta(days=28)
 
-    cursor.execute("""
+    cursor.execute(
+        """
         UPDATE acessos
         SET data_inicio = %s,
             data_final = %s
         WHERE codigo_acesso = %s
         AND caso_id = %s
-    """, (
-        data_inicio,
-        data_final,
-        dados.codigo_acesso,
-        dados.caso_id
-    ))
+        """,
+        (
+            data_inicio,
+            data_final,
+            dados.codigo_acesso,
+            dados.caso_id
+        )
+    )
 
-    cursor.execute("""
+    cursor.execute(
+        """
         INSERT INTO progresso (
             codigo_acesso,
             nome,
@@ -357,16 +452,18 @@ def aceitar_caso(dados: AceiteCaso):
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (codigo_acesso, caso_id)
         DO NOTHING
-    """, (
-        dados.codigo_acesso,
-        dados.nome,
-        dados.caso_id,
-        "",
-        0,
-        False,
-        data_inicio,
-        data_final
-    ))
+        """,
+        (
+            dados.codigo_acesso,
+            dados.nome,
+            dados.caso_id,
+            "",
+            0,
+            False,
+            data_inicio,
+            data_final
+        )
+    )
 
     conn.commit()
     cursor.close()
@@ -374,14 +471,14 @@ def aceitar_caso(dados: AceiteCaso):
 
     return {
         "autorizado": True,
-        "mensagem": "Caso aceito com sucesso",
+        "mensagem": "Caso aceito com sucesso.",
         "data_inicio": data_inicio,
         "data_final": data_final
     }
 
 
 # =========================
-# PROGRESSO
+# SALVAR PROGRESSO
 # =========================
 
 @app.post("/progresso")
@@ -389,19 +486,23 @@ def salvar_progresso(dados: Progresso):
     conn = conectar()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT *
         FROM acessos
         WHERE codigo_acesso = %s
         AND caso_id = %s
         AND ativo = TRUE
-    """, (dados.codigo_acesso, dados.caso_id))
+        """,
+        (dados.codigo_acesso, dados.caso_id)
+    )
 
     acesso = cursor.fetchone()
 
     if not acesso:
         cursor.close()
         conn.close()
+
         return {
             "autorizado": False,
             "mensagem": "Código inválido, inativo ou sem acesso a este caso."
@@ -416,20 +517,24 @@ def salvar_progresso(dados: Progresso):
         data_inicio = datetime.utcnow()
         data_final = data_inicio + timedelta(days=28)
 
-        cursor.execute("""
+        cursor.execute(
+            """
             UPDATE acessos
             SET data_inicio = %s,
                 data_final = %s
             WHERE codigo_acesso = %s
             AND caso_id = %s
-        """, (
-            data_inicio,
-            data_final,
-            dados.codigo_acesso,
-            dados.caso_id
-        ))
+            """,
+            (
+                data_inicio,
+                data_final,
+                dados.codigo_acesso,
+                dados.caso_id
+            )
+        )
 
-    cursor.execute("""
+    cursor.execute(
+        """
         INSERT INTO progresso (
             codigo_acesso,
             nome,
@@ -453,17 +558,19 @@ def salvar_progresso(dados: Progresso):
             data_inicio = EXCLUDED.data_inicio,
             data_final = EXCLUDED.data_final,
             atualizado_em = CURRENT_TIMESTAMP
-    """, (
-        dados.codigo_acesso,
-        dados.nome,
-        dados.caso_id,
-        dados.voto,
-        teorias_texto,
-        dados.pistas_liberadas,
-        dados.revelacao_liberada,
-        data_inicio,
-        data_final
-    ))
+        """,
+        (
+            dados.codigo_acesso,
+            dados.nome,
+            dados.caso_id,
+            dados.voto,
+            teorias_texto,
+            dados.pistas_liberadas,
+            dados.revelacao_liberada,
+            data_inicio,
+            data_final
+        )
+    )
 
     conn.commit()
     cursor.close()
@@ -471,40 +578,51 @@ def salvar_progresso(dados: Progresso):
 
     return {
         "autorizado": True,
-        "mensagem": "Progresso salvo com sucesso"
+        "mensagem": "Progresso salvo com sucesso."
     }
 
+
+# =========================
+# BUSCAR PROGRESSO
+# =========================
 
 @app.get("/progresso/{codigo_acesso}/{caso_id}")
 def buscar_progresso(codigo_acesso: str, caso_id: str):
     conn = conectar()
     cursor = conn.cursor()
 
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT *
         FROM acessos
         WHERE codigo_acesso = %s
         AND caso_id = %s
         AND ativo = TRUE
-    """, (codigo_acesso, caso_id))
+        """,
+        (codigo_acesso, caso_id)
+    )
 
     acesso = cursor.fetchone()
 
     if not acesso:
         cursor.close()
         conn.close()
+
         return {
             "encontrado": False,
             "autorizado": False,
             "mensagem": "Código inválido, inativo ou sem acesso a este caso."
         }
 
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT *
         FROM progresso
         WHERE codigo_acesso = %s
         AND caso_id = %s
-    """, (codigo_acesso, caso_id))
+        """,
+        (codigo_acesso, caso_id)
+    )
 
     row = cursor.fetchone()
 
@@ -523,16 +641,19 @@ def buscar_progresso(codigo_acesso: str, caso_id: str):
             "data_final": acesso["data_final"]
         }
 
-    teorias = row["teorias"].split("||") if row["teorias"] else []
+    teorias = []
+
+    if row["teorias"]:
+        teorias = row["teorias"].split("||")
 
     agora = datetime.utcnow()
     data_inicio = row["data_inicio"]
     data_final = row["data_final"]
 
+    dias_passados = 0
+
     if data_inicio:
         dias_passados = (agora - data_inicio).days
-    else:
-        dias_passados = 0
 
     semana_atual = 1
 
@@ -563,34 +684,4 @@ def buscar_progresso(codigo_acesso: str, caso_id: str):
         "dias_passados": dias_passados,
         "semana_atual": semana_atual,
         "revelacao_disponivel": revelacao_disponivel
-    }
-    @app.get("/popular-acessos")
-def popular_acessos():
-    conn = conectar()
-    cursor = conn.cursor()
-
-    criar_acessos_iniciais(cursor, conn)
-
-    cursor.execute("""
-        SELECT
-            codigo_acesso,
-            nome_cliente,
-            caso_id,
-            ativo,
-            data_criacao,
-            data_inicio,
-            data_final
-        FROM acessos
-        ORDER BY codigo_acesso ASC
-    """)
-
-    acessos = cursor.fetchall()
-
-    cursor.close()
-    conn.close()
-
-    return {
-        "mensagem": "Acessos iniciais criados/verificados com sucesso.",
-        "total": len(acessos),
-        "acessos": acessos
     }
