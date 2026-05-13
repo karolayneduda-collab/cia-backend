@@ -53,6 +53,11 @@ class ProgressoCaso(BaseModel):
     revelacao_liberada: bool = False
     missoes_concluidas: list[str] = []
 
+class NovoAcesso(BaseModel):
+    codigo_acesso: str
+    nome_cliente: str
+    caso_id: str = "arquivo001"
+    ativo: bool = True
 
 class AdicionarXP(BaseModel):
     codinome: str
@@ -105,19 +110,69 @@ def criar_tabelas():
     cursor = conn.cursor()
 
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS investigadores (
-            id SERIAL PRIMARY KEY,
-            codinome TEXT UNIQUE NOT NULL,
-            chave_acesso TEXT NOT NULL,
-            nome_exibicao TEXT,
-            foto_url TEXT,
-            patente TEXT DEFAULT 'Recruta',
-            xp INTEGER DEFAULT 0,
-            status TEXT DEFAULT 'ativo',
-            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        CREATE TABLE IF NOT EXISTS acessos (
+            codigo_acesso TEXT PRIMARY KEY,
+            nome_cliente TEXT NOT NULL,
+            caso_id TEXT NOT NULL,
+            ativo BOOLEAN DEFAULT TRUE,
+            data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            data_inicio TIMESTAMP,
+            data_final TIMESTAMP
         )
     """)
+
+    def criar_acessos_iniciais(cursor, conn):
+    acessos_iniciais = [
+        ("CIA001-ANA2026", "Ana", "arquivo001"),
+        ("CIA002-MARIA2026", "Maria", "arquivo001"),
+        ("CIA003-JULIA2026", "Julia", "arquivo001"),
+        ("CIA004-CARLA2026", "Carla", "arquivo001"),
+        ("CIA005-AMANDA2026", "Amanda", "arquivo001"),
+        ("CIA006-LUCAS2026", "Lucas", "arquivo001"),
+        ("CIA007-PAULA2026", "Paula", "arquivo001"),
+        ("CIA008-RAFA2026", "Rafa", "arquivo001"),
+        ("CIA009-BIA2026", "Bia", "arquivo001"),
+        ("CIA010-TESTE2026", "Teste", "arquivo001"),
+    ]
+
+    for codigo, nome, caso_id in acessos_iniciais:
+        cursor.execute("""
+            INSERT INTO acessos (
+                codigo_acesso,
+                nome_cliente,
+                caso_id,
+                ativo
+            )
+            VALUES (%s, %s, %s, TRUE)
+            ON CONFLICT (codigo_acesso)
+            DO NOTHING
+        """, (codigo, nome, caso_id))
+
+    conn.commit()
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS progresso (
+            codigo_acesso TEXT NOT NULL,
+            nome TEXT NOT NULL,
+            caso_id TEXT NOT NULL,
+            voto TEXT,
+            teorias TEXT,
+            pistas_liberadas INTEGER DEFAULT 0,
+            revelacao_liberada BOOLEAN DEFAULT FALSE,
+            data_inicio TIMESTAMP,
+            data_final TIMESTAMP,
+            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (codigo_acesso, caso_id)
+        )
+    """)
+
+    conn.commit()
+
+    criar_acessos_iniciais(cursor, conn)
+
+    cursor.close()
+    conn.close()
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS progresso_casos (
@@ -358,78 +413,71 @@ def aceitar_caso(dados: AceiteCaso):
 
     cursor.execute("""
         SELECT *
-        FROM investigadores
-        WHERE codinome = %s AND status = 'ativo'
-    """, (dados.codinome,))
+        FROM acessos
+        WHERE codigo_acesso = %s
+        AND caso_id = %s
+        AND ativo = TRUE
+    """, (dados.codigo_acesso, dados.caso_id))
 
-    investigador = cursor.fetchone()
+    acesso = cursor.fetchone()
 
-    if not investigador:
+    if not acesso:
         cursor.close()
         conn.close()
-        raise HTTPException(status_code=404, detail="Investigador não encontrado ou inativo.")
-
-    cursor.execute("""
-        SELECT *
-        FROM progresso_casos
-        WHERE codinome = %s AND caso_id = %s
-    """, (
-        dados.codinome,
-        dados.caso_id
-    ))
-
-    existente = cursor.fetchone()
-
-    if existente:
-        cursor.close()
-        conn.close()
-
         return {
-            "mensagem": "Caso já havia sido aceito.",
-            "data_inicio": existente["data_inicio"],
-            "data_final": existente["data_final"],
-            "semana_atual": calcular_semana(existente["data_inicio"])
+            "autorizado": False,
+            "mensagem": "Código inválido, inativo ou sem acesso a este caso."
+        }
+
+    if acesso["data_inicio"]:
+        cursor.close()
+        conn.close()
+        return {
+            "autorizado": True,
+            "mensagem": "Caso já havia sido aceito",
+            "data_inicio": acesso["data_inicio"],
+            "data_final": acesso["data_final"]
         }
 
     data_inicio = datetime.utcnow()
     data_final = data_inicio + timedelta(days=28)
 
     cursor.execute("""
-        INSERT INTO progresso_casos (
-            codinome,
+        UPDATE acessos
+        SET data_inicio = %s,
+            data_final = %s
+        WHERE codigo_acesso = %s
+        AND caso_id = %s
+    """, (
+        data_inicio,
+        data_final,
+        dados.codigo_acesso,
+        dados.caso_id
+    ))
+
+    cursor.execute("""
+        INSERT INTO progresso (
+            codigo_acesso,
+            nome,
             caso_id,
             teorias,
             pistas_liberadas,
             revelacao_liberada,
-            missoes_concluidas,
             data_inicio,
             data_final
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (codigo_acesso, caso_id)
+        DO NOTHING
     """, (
-        dados.codinome,
+        dados.codigo_acesso,
+        dados.nome,
         dados.caso_id,
         "",
         0,
         False,
-        "",
         data_inicio,
         data_final
-    ))
-
-    novo_xp = investigador["xp"] + 50
-    nova_patente = calcular_patente(novo_xp)
-
-    cursor.execute("""
-        UPDATE investigadores
-        SET xp = %s,
-            patente = %s,
-            atualizado_em = CURRENT_TIMESTAMP
-        WHERE codinome = %s
-    """, (
-        novo_xp,
-        nova_patente,
-        dados.codinome
     ))
 
     conn.commit()
@@ -437,13 +485,10 @@ def aceitar_caso(dados: AceiteCaso):
     conn.close()
 
     return {
-        "mensagem": "Caso aceito com sucesso.",
+        "autorizado": True,
+        "mensagem": "Caso aceito com sucesso",
         "data_inicio": data_inicio,
-        "data_final": data_final,
-        "semana_atual": 1,
-        "xp_ganho": 50,
-        "xp_total": novo_xp,
-        "patente": nova_patente
+        "data_final": data_final
     }
 
 
@@ -568,4 +613,97 @@ def buscar_progresso(codinome: str, caso_id: str):
         "dias_restantes": dias_restantes,
         "semana_atual": semana_atual,
         "revelacao_disponivel": revelacao_disponivel
+    }
+@app.get("/validar-acesso/{codigo_acesso}/{caso_id}")
+def validar_acesso(codigo_acesso: str, caso_id: str):
+    conn = conectar()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT *
+        FROM acessos
+        WHERE codigo_acesso = %s
+        AND caso_id = %s
+        AND ativo = TRUE
+    """, (codigo_acesso, caso_id))
+
+    acesso = cursor.fetchone()
+
+    cursor.close()
+    conn.close()
+
+    if not acesso:
+        return {
+            "valido": False,
+            "mensagem": "Código inválido, inativo ou sem acesso a este caso."
+        }
+
+    return {
+        "valido": True,
+        "mensagem": "Acesso autorizado.",
+        "codigo_acesso": acesso["codigo_acesso"],
+        "nome_cliente": acesso["nome_cliente"],
+        "caso_id": acesso["caso_id"],
+        "data_inicio": acesso["data_inicio"],
+        "data_final": acesso["data_final"]
+    }
+
+
+@app.get("/acessos")
+def listar_acessos():
+    conn = conectar()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT codigo_acesso, nome_cliente, caso_id, ativo, data_criacao, data_inicio, data_final
+        FROM acessos
+        ORDER BY codigo_acesso ASC
+    """)
+
+    acessos = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    return {
+        "total": len(acessos),
+        "acessos": acessos
+    }
+
+
+@app.post("/criar-acesso")
+def criar_acesso(dados: NovoAcesso):
+    conn = conectar()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO acessos (
+            codigo_acesso,
+            nome_cliente,
+            caso_id,
+            ativo
+        )
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (codigo_acesso)
+        DO UPDATE SET
+            nome_cliente = EXCLUDED.nome_cliente,
+            caso_id = EXCLUDED.caso_id,
+            ativo = EXCLUDED.ativo
+    """, (
+        dados.codigo_acesso,
+        dados.nome_cliente,
+        dados.caso_id,
+        dados.ativo
+    ))
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return {
+        "mensagem": "Acesso criado ou atualizado com sucesso.",
+        "codigo_acesso": dados.codigo_acesso,
+        "nome_cliente": dados.nome_cliente,
+        "caso_id": dados.caso_id,
+        "ativo": dados.ativo
     }
