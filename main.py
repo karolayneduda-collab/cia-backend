@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
@@ -12,28 +12,56 @@ app = FastAPI(title="C.I.A. Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # depois podemos limitar para seu domínio do Netlify
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-class Progresso(BaseModel):
-    codigo_acesso: str
-    nome: str
+# =========================
+# MODELOS
+# =========================
+
+class CriarInvestigador(BaseModel):
+    codinome: str
+    chave_acesso: str
+    nome_exibicao: str | None = None
+
+
+class LoginInvestigador(BaseModel):
+    codinome: str
+    chave_acesso: str
+
+
+class AtualizarFoto(BaseModel):
+    codinome: str
+    foto_url: str
+
+
+class AceiteCaso(BaseModel):
+    codinome: str
+    caso_id: str
+
+
+class ProgressoCaso(BaseModel):
+    codinome: str
     caso_id: str
     voto: str | None = None
     teorias: list[str] = []
     pistas_liberadas: int = 0
     revelacao_liberada: bool = False
+    missoes_concluidas: list[str] = []
 
 
-class AceiteCaso(BaseModel):
-    codigo_acesso: str
-    nome: str
-    caso_id: str
+class AdicionarXP(BaseModel):
+    codinome: str
+    xp: int
 
+
+# =========================
+# FUNÇÕES AUXILIARES
+# =========================
 
 def conectar():
     if not DATABASE_URL:
@@ -41,24 +69,71 @@ def conectar():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 
+def calcular_patente(xp: int):
+    if xp >= 2000:
+        return "Chefe de Investigação"
+    if xp >= 1200:
+        return "Analista de Casos"
+    if xp >= 700:
+        return "Investigador Nível 3"
+    if xp >= 350:
+        return "Investigador Nível 2"
+    if xp >= 100:
+        return "Investigador Nível 1"
+    return "Recruta"
+
+
+def calcular_semana(data_inicio):
+    if not data_inicio:
+        return 1
+
+    agora = datetime.utcnow()
+    dias_passados = (agora - data_inicio).days
+
+    if dias_passados >= 22:
+        return 4
+    if dias_passados >= 15:
+        return 3
+    if dias_passados >= 8:
+        return 2
+
+    return 1
+
+
 def criar_tabelas():
     conn = conectar()
     cursor = conn.cursor()
 
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS progresso (
-            codigo_acesso TEXT NOT NULL,
-            nome TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS investigadores (
+            id SERIAL PRIMARY KEY,
+            codinome TEXT UNIQUE NOT NULL,
+            chave_acesso TEXT NOT NULL,
+            nome_exibicao TEXT,
+            foto_url TEXT,
+            patente TEXT DEFAULT 'Recruta',
+            xp INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'ativo',
+            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS progresso_casos (
+            id SERIAL PRIMARY KEY,
+            codinome TEXT NOT NULL,
             caso_id TEXT NOT NULL,
             voto TEXT,
             teorias TEXT,
             pistas_liberadas INTEGER DEFAULT 0,
             revelacao_liberada BOOLEAN DEFAULT FALSE,
+            missoes_concluidas TEXT,
             data_inicio TIMESTAMP,
             data_final TIMESTAMP,
             criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (codigo_acesso, caso_id)
+            UNIQUE (codinome, caso_id)
         )
     """)
 
@@ -72,10 +147,209 @@ def iniciar():
     criar_tabelas()
 
 
+# =========================
+# ROTAS PRINCIPAIS
+# =========================
+
 @app.get("/")
 def home():
-    return {"status": "Backend da C.I.A. funcionando no Render"}
+    return {
+        "status": "Backend da C.I.A. funcionando no Render",
+        "sistema": "Central de Investigação Autônoma"
+    }
 
+
+# =========================
+# INVESTIGADORES
+# =========================
+
+@app.post("/criar-investigador")
+def criar_investigador(dados: CriarInvestigador):
+    conn = conectar()
+    cursor = conn.cursor()
+
+    codinome = dados.codinome.strip()
+    chave = dados.chave_acesso.strip()
+    nome = dados.nome_exibicao.strip() if dados.nome_exibicao else codinome
+
+    cursor.execute("""
+        SELECT codinome
+        FROM investigadores
+        WHERE codinome = %s
+    """, (codinome,))
+
+    existente = cursor.fetchone()
+
+    if existente:
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=400, detail="Este codinome já existe.")
+
+    cursor.execute("""
+        INSERT INTO investigadores (
+            codinome,
+            chave_acesso,
+            nome_exibicao,
+            patente,
+            xp,
+            status
+        )
+        VALUES (%s, %s, %s, %s, %s, %s)
+    """, (
+        codinome,
+        chave,
+        nome,
+        "Recruta",
+        0,
+        "ativo"
+    ))
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return {
+        "mensagem": "Credencial de investigador criada com sucesso.",
+        "codinome": codinome,
+        "chave_acesso": chave,
+        "patente": "Recruta",
+        "xp": 0,
+        "status": "ativo"
+    }
+
+
+@app.post("/login")
+def login(dados: LoginInvestigador):
+    conn = conectar()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT *
+        FROM investigadores
+        WHERE codinome = %s AND chave_acesso = %s
+    """, (
+        dados.codinome.strip(),
+        dados.chave_acesso.strip()
+    ))
+
+    investigador = cursor.fetchone()
+
+    cursor.close()
+    conn.close()
+
+    if not investigador:
+        raise HTTPException(status_code=401, detail="Codinome ou chave de acesso inválidos.")
+
+    if investigador["status"] != "ativo":
+        raise HTTPException(status_code=403, detail="Credencial inativa.")
+
+    return {
+        "autenticado": True,
+        "mensagem": "Credencial localizada.",
+        "investigador": {
+            "codinome": investigador["codinome"],
+            "nome_exibicao": investigador["nome_exibicao"],
+            "foto_url": investigador["foto_url"],
+            "patente": investigador["patente"],
+            "xp": investigador["xp"],
+            "status": investigador["status"]
+        }
+    }
+
+
+@app.get("/investigador/{codinome}")
+def buscar_investigador(codinome: str):
+    conn = conectar()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT codinome, nome_exibicao, foto_url, patente, xp, status, criado_em
+        FROM investigadores
+        WHERE codinome = %s
+    """, (codinome,))
+
+    investigador = cursor.fetchone()
+
+    cursor.close()
+    conn.close()
+
+    if not investigador:
+        raise HTTPException(status_code=404, detail="Investigador não encontrado.")
+
+    return investigador
+
+
+@app.post("/atualizar-foto")
+def atualizar_foto(dados: AtualizarFoto):
+    conn = conectar()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE investigadores
+        SET foto_url = %s,
+            atualizado_em = CURRENT_TIMESTAMP
+        WHERE codinome = %s
+    """, (
+        dados.foto_url,
+        dados.codinome
+    ))
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return {
+        "mensagem": "Foto da credencial atualizada com sucesso."
+    }
+
+
+@app.post("/adicionar-xp")
+def adicionar_xp(dados: AdicionarXP):
+    conn = conectar()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT xp
+        FROM investigadores
+        WHERE codinome = %s
+    """, (dados.codinome,))
+
+    investigador = cursor.fetchone()
+
+    if not investigador:
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Investigador não encontrado.")
+
+    novo_xp = investigador["xp"] + dados.xp
+    nova_patente = calcular_patente(novo_xp)
+
+    cursor.execute("""
+        UPDATE investigadores
+        SET xp = %s,
+            patente = %s,
+            atualizado_em = CURRENT_TIMESTAMP
+        WHERE codinome = %s
+    """, (
+        novo_xp,
+        nova_patente,
+        dados.codinome
+    ))
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return {
+        "mensagem": "XP atualizado com sucesso.",
+        "xp": novo_xp,
+        "patente": nova_patente
+    }
+
+
+# =========================
+# CASOS / PROGRESSO
+# =========================
 
 @app.post("/aceitar-caso")
 def aceitar_caso(dados: AceiteCaso):
@@ -84,45 +358,78 @@ def aceitar_caso(dados: AceiteCaso):
 
     cursor.execute("""
         SELECT *
-        FROM progresso
-        WHERE codigo_acesso = %s AND caso_id = %s
-    """, (dados.codigo_acesso, dados.caso_id))
+        FROM investigadores
+        WHERE codinome = %s AND status = 'ativo'
+    """, (dados.codinome,))
+
+    investigador = cursor.fetchone()
+
+    if not investigador:
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Investigador não encontrado ou inativo.")
+
+    cursor.execute("""
+        SELECT *
+        FROM progresso_casos
+        WHERE codinome = %s AND caso_id = %s
+    """, (
+        dados.codinome,
+        dados.caso_id
+    ))
 
     existente = cursor.fetchone()
 
     if existente:
         cursor.close()
         conn.close()
+
         return {
-            "mensagem": "Caso já havia sido aceito",
+            "mensagem": "Caso já havia sido aceito.",
             "data_inicio": existente["data_inicio"],
-            "data_final": existente["data_final"]
+            "data_final": existente["data_final"],
+            "semana_atual": calcular_semana(existente["data_inicio"])
         }
 
     data_inicio = datetime.utcnow()
     data_final = data_inicio + timedelta(days=28)
 
     cursor.execute("""
-        INSERT INTO progresso (
-            codigo_acesso,
-            nome,
+        INSERT INTO progresso_casos (
+            codinome,
             caso_id,
             teorias,
             pistas_liberadas,
             revelacao_liberada,
+            missoes_concluidas,
             data_inicio,
             data_final
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """, (
-        dados.codigo_acesso,
-        dados.nome,
+        dados.codinome,
         dados.caso_id,
         "",
         0,
         False,
+        "",
         data_inicio,
         data_final
+    ))
+
+    novo_xp = investigador["xp"] + 50
+    nova_patente = calcular_patente(novo_xp)
+
+    cursor.execute("""
+        UPDATE investigadores
+        SET xp = %s,
+            patente = %s,
+            atualizado_em = CURRENT_TIMESTAMP
+        WHERE codinome = %s
+    """, (
+        novo_xp,
+        nova_patente,
+        dados.codinome
     ))
 
     conn.commit()
@@ -130,24 +437,32 @@ def aceitar_caso(dados: AceiteCaso):
     conn.close()
 
     return {
-        "mensagem": "Caso aceito com sucesso",
+        "mensagem": "Caso aceito com sucesso.",
         "data_inicio": data_inicio,
-        "data_final": data_final
+        "data_final": data_final,
+        "semana_atual": 1,
+        "xp_ganho": 50,
+        "xp_total": novo_xp,
+        "patente": nova_patente
     }
 
 
 @app.post("/progresso")
-def salvar_progresso(dados: Progresso):
+def salvar_progresso(dados: ProgressoCaso):
     conn = conectar()
     cursor = conn.cursor()
 
     teorias_texto = "||".join(dados.teorias)
+    missoes_texto = "||".join(dados.missoes_concluidas)
 
     cursor.execute("""
         SELECT data_inicio, data_final
-        FROM progresso
-        WHERE codigo_acesso = %s AND caso_id = %s
-    """, (dados.codigo_acesso, dados.caso_id))
+        FROM progresso_casos
+        WHERE codinome = %s AND caso_id = %s
+    """, (
+        dados.codinome,
+        dados.caso_id
+    ))
 
     existente = cursor.fetchone()
 
@@ -159,35 +474,35 @@ def salvar_progresso(dados: Progresso):
         data_final = data_inicio + timedelta(days=28)
 
     cursor.execute("""
-        INSERT INTO progresso (
-            codigo_acesso,
-            nome,
+        INSERT INTO progresso_casos (
+            codinome,
             caso_id,
             voto,
             teorias,
             pistas_liberadas,
             revelacao_liberada,
+            missoes_concluidas,
             data_inicio,
             data_final,
             atualizado_em
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-        ON CONFLICT (codigo_acesso, caso_id)
+        ON CONFLICT (codinome, caso_id)
         DO UPDATE SET
-            nome = EXCLUDED.nome,
             voto = EXCLUDED.voto,
             teorias = EXCLUDED.teorias,
             pistas_liberadas = EXCLUDED.pistas_liberadas,
             revelacao_liberada = EXCLUDED.revelacao_liberada,
+            missoes_concluidas = EXCLUDED.missoes_concluidas,
             atualizado_em = CURRENT_TIMESTAMP
     """, (
-        dados.codigo_acesso,
-        dados.nome,
+        dados.codinome,
         dados.caso_id,
         dados.voto,
         teorias_texto,
         dados.pistas_liberadas,
         dados.revelacao_liberada,
+        missoes_texto,
         data_inicio,
         data_final
     ))
@@ -196,68 +511,61 @@ def salvar_progresso(dados: Progresso):
     cursor.close()
     conn.close()
 
-    return {"mensagem": "Progresso salvo com sucesso"}
+    return {
+        "mensagem": "Progresso salvo com sucesso."
+    }
 
 
-@app.get("/progresso/{codigo_acesso}/{caso_id}")
-def buscar_progresso(codigo_acesso: str, caso_id: str):
+@app.get("/progresso/{codinome}/{caso_id}")
+def buscar_progresso(codinome: str, caso_id: str):
     conn = conectar()
     cursor = conn.cursor()
 
     cursor.execute("""
         SELECT *
-        FROM progresso
-        WHERE codigo_acesso = %s AND caso_id = %s
-    """, (codigo_acesso, caso_id))
+        FROM progresso_casos
+        WHERE codinome = %s AND caso_id = %s
+    """, (
+        codinome,
+        caso_id
+    ))
 
-    row = cursor.fetchone()
+    progresso = cursor.fetchone()
 
     cursor.close()
     conn.close()
 
-    if not row:
+    if not progresso:
         return {
             "encontrado": False,
-            "mensagem": "Nenhum progresso encontrado"
+            "mensagem": "Nenhum progresso encontrado."
         }
 
-    teorias = row["teorias"].split("||") if row["teorias"] else []
+    teorias = progresso["teorias"].split("||") if progresso["teorias"] else []
+    missoes = progresso["missoes_concluidas"].split("||") if progresso["missoes_concluidas"] else []
 
     agora = datetime.utcnow()
-    data_inicio = row["data_inicio"]
-    data_final = row["data_final"]
+    data_inicio = progresso["data_inicio"]
+    data_final = progresso["data_final"]
 
-    if data_inicio:
-        dias_passados = (agora - data_inicio).days
-    else:
-        dias_passados = 0
-
-    semana_atual = 1
-
-    if dias_passados >= 22:
-        semana_atual = 4
-    elif dias_passados >= 15:
-        semana_atual = 3
-    elif dias_passados >= 8:
-        semana_atual = 2
-
-    revelacao_disponivel = False
-
-    if data_final and agora >= data_final:
-        revelacao_disponivel = True
+    dias_passados = (agora - data_inicio).days if data_inicio else 0
+    dias_restantes = max(28 - dias_passados, 0)
+    semana_atual = calcular_semana(data_inicio)
+    revelacao_disponivel = bool(data_final and agora >= data_final)
 
     return {
         "encontrado": True,
-        "codigo_acesso": row["codigo_acesso"],
-        "nome": row["nome"],
-        "caso_id": row["caso_id"],
-        "voto": row["voto"],
+        "codinome": progresso["codinome"],
+        "caso_id": progresso["caso_id"],
+        "voto": progresso["voto"],
         "teorias": teorias,
-        "pistas_liberadas": row["pistas_liberadas"],
-        "revelacao_liberada": row["revelacao_liberada"],
-        "data_inicio": row["data_inicio"],
-        "data_final": row["data_final"],
+        "pistas_liberadas": progresso["pistas_liberadas"],
+        "revelacao_liberada": progresso["revelacao_liberada"],
+        "missoes_concluidas": missoes,
+        "data_inicio": data_inicio,
+        "data_final": data_final,
         "dias_passados": dias_passados,
+        "dias_restantes": dias_restantes,
         "semana_atual": semana_atual,
         "revelacao_disponivel": revelacao_disponivel
     }
